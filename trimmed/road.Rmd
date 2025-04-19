@@ -1,0 +1,973 @@
+---
+title: "Road trimmed"
+author: "Elia Gonzato"
+date: "2024-12-19"
+output: pdf_document
+---
+
+# Libraries
+
+```{r, warning=F,message=F, echo=FALSE}
+library(pacman)
+p_load(metafor,
+       meta,
+       readxl,
+       grid,
+       splines,
+       gdata,
+       dplyr,
+       ggplot2,
+       forestploter,
+       writexl,
+       dosresmeta)
+```
+\
+Three datasets are needed to perform analysis, specifically: `meta`, `metaregr` and `*.ihme`.
+
+# Dataset for the analysis
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+mi.trim=mi.ihme %>%
+  mutate(studyid=study_id) %>% 
+  select(studyid, is_outlier) %>% 
+  arrange(studyid)
+```
+
+# MI
+
+Analysis for myocardial infarction
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# filter for the outcome of interest
+mi=meta %>% 
+  filter(disease=='Acute myocardial infarction') %>% 
+  arrange(studyid)
+# filter other rows
+mi=mi[-c(2,10:13,17,22:24),]
+```
+\
+Compute fixed and random effects models
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# fixed effects
+fixed.mi=metagen(beta,sebeta,data=mi,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=TRUE,comb.random=FALSE,sm="RR")
+# random effects
+random.mi=metagen(beta,sebeta,data=mi,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=FALSE,comb.random=TRUE,
+                     method.tau="PM",prediction=TRUE,hakn=TRUE,sm="RR")
+```
+\
+Summary of fixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(fixed.mi)
+```
+\
+Summary of mixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(random.mi)
+```
+
+
+### Forest plot
+
+Forest plot of the chosen model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, out.width="50%", fig.align="center", fig.width=2}
+meta::forest(random.mi,
+             sortvar=country,
+             #fill='lightgrey',
+             #layout = "BMJ",
+             #type.study='circle',
+             psize=rep(0.3,11),
+             lty.equi = 2,
+             cex = 0.3,
+             #circlesize=0.8,
+             #rightlabs=c('RR', "95% CI", "Weight"),
+             header.line='both',
+             weight.study='same',
+             col.circle='black',
+             #col.lines='black',
+             ff.random='bold',
+             ff.predict='bold',
+             ff.hetstat='bold',
+             ff.test.overall='bold',
+             ff.random.labels = 'bold',
+             col.diamond.random='navy',
+             col.predict='red',
+             leftcols=c("studlab", "year", "country","metric"),
+             leftlabs = c("Study", "Year", "Country","Outcome"))
+```
+
+
+## Meta-regression
+
+Meta-regression to fit exposure-response function with splines
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# filter dataset
+miregr= metaregr %>% filter(disease=='Acute myocardial infarction')
+# add outlier column
+miregr$outlier=mi.trim$is_outlier
+# filter
+miregr=miregr %>% filter(outlier==0)
+# create splines object on the observed noise level exposure
+spline_basis=ns(miregr$noiselevel, df = 3)
+# compute meta-regression
+res_spline=rma(yi = beta, sei = sebeta, 
+                  mods = spline_basis, 
+                  #random = ~ 1 | author,
+                  data = miregr, 
+               method = "REML")
+```
+\
+With the new object, compute predictions over the interval, to obtain the exposure response function
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# create new level of exposure
+new_exposure=seq(min(miregr$noiselevel),
+                 max(miregr$noiselevel), length.out = 100)
+# fit splines to the new exposure
+new_spline_basis=ns(new_exposure, df = 3)
+# predict 
+pred_spline1=predict(res_spline, newmods = new_spline_basis)
+# create df
+dfsplines1=data.frame(pred=pred_spline1$pred,
+                     lower=pred_spline1$ci.lb,
+                     upper=pred_spline1$ci.ub,
+                     exposure=new_exposure)
+```
+\
+Plot exposure response function with points
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, out.width="50%", fig.align="center"}
+ggplot(miregr,aes(x=noiselevel,y=beta))+
+  geom_point(aes(x=noiselevel,y=beta,size=sebeta),alpha=.5,col="#005c99")+
+  #geom_label_repel()+
+  guides(size='none')+
+  labs(x='Noise Exposure',
+       y='Log Relative Risk')+
+  scale_x_continuous(breaks=seq(45,80,5))+
+  geom_line(data=dfsplines1,aes(x=exposure,y=pred), col="#66a3ff")+
+  geom_ribbon(data=dfsplines1,aes(x=exposure,y=pred,ymin = lower, ymax = upper),
+              alpha = 0.2, col="#66a3ff",fill="#66a3ff") +  # Add confidence intervals
+  theme_bw()+
+  geom_hline(yintercept = 0,lty=2,col='black')
+```
+
+
+### Funnel plot
+
+Funnel plot for publication bias assessment:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, out.width="50%", fig.align="center"}
+residuals=residuals(res_spline)
+miregr$residuals=residuals
+# extract estimate
+estimate=0
+se=res_spline$se[1]
+se.seq=seq(0, max(miregr$sebeta)+0.02, 0.01)
+#Compute vectors of the lower-limit and upper limit values for
+#the 95% CI region
+ll95 = estimate-(1.96*se.seq)
+ul95 = estimate+(1.96*se.seq)
+#
+seq.mean=seq(0,0.25,by=0.1)
+#You can ignore it.
+dfcenter=data.frame(y=estimate,
+                    x=seq(0,max(miregr$sebeta)+0.02,0.01))
+dfCI = data.frame(ll95, ul95, se.seq, estimate)
+# Define fill colors for contour
+ggplot(data=miregr,aes(x=sebeta,y=residuals))+
+  geom_point(data=miregr,aes(x=sebeta,y=beta,size=sebeta,alpha=0.7))+
+  geom_line(aes(x = se.seq, y = ll95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  geom_line(aes(x = se.seq, y = ul95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  #geom_line(aes(x = se.seq, y = ll99), data = dfCI,col='red') +
+  #geom_line(aes(x = se.seq, y = ul99), data = dfCI,col='red') +
+  geom_line(aes(x=x,y=y),col='black',data=,dfcenter,alpha=0.8,lty=2)+
+  scale_x_reverse()+
+  scale_y_continuous(breaks=seq(-1.25,2,0.25))+
+  coord_flip()+
+  guides(size='none',
+         alpha='none')+
+     annotate(geom = "polygon", x = c(max(se.seq), 0, max(se.seq)),
+              y = c(min(dfCI$ll95), estimate,max(dfCI$ul95)), fill = "gray", alpha = 0.1 )+
+  theme_bw()+
+  labs(x='Standard Error',
+       y='Residuals')
+```
+\
+Egger's test to test presence of publication bias:
+\
+```{r}
+#Egger's test
+egger_test=lm(beta ~ sebeta, data = miregr)
+summary(egger_test)
+et_pval=summary(egger_test)$coefficients[2, 4]
+print(et_pval)
+```
+
+
+
+# IHD
+
+## Meta-Analysis
+
+Analysis for ischemic heart disease:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+keep(meta, metaregr, sure = T)
+# trim dataset
+ihd.trim=ihd.ihme %>%
+  mutate(studyid=study_id) %>% 
+  select(studyid, is_outlier) %>% 
+  arrange(studyid)
+```
+\
+First perform meta-analysis
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+# filter for the outcome of interest
+ihd=meta %>% 
+  filter(disease=='Ischemic heart disease') %>% 
+  arrange(studyid)
+# merge trimmed and 
+ihd=ihd[-5,]
+```
+\
+Compute fixed and random effects models
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# fixed effects
+fixed.ihd=metagen(beta,sebeta,data=ihd,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=TRUE,comb.random=FALSE,sm="RR")
+# random effects
+random.ihd=metagen(beta,sebeta,data=ihd,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=FALSE,comb.random=TRUE,
+                     method.tau="PM",prediction=TRUE,hakn=TRUE,sm="RR")
+```
+\
+Summary of fixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(fixed.ihd)
+```
+\
+Summary of mixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(random.ihd)
+```
+
+
+### Forest plot
+
+Forest plot of the chosen model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+meta::forest(random.ihd,
+             sortvar=country,
+             #fill='lightgrey',
+             #layout = "BMJ",
+             #type.study='circle',
+             psize=rep(0.3,11),
+             lty.equi = 2,
+             cex = 0.3,
+             #circlesize=0.8,
+             #rightlabs=c('RR', "95% CI", "Weight"),
+             header.line='both',
+             weight.study='same',
+             col.circle='black',
+             #col.lines='black',
+             ff.random='bold',
+             ff.predict='bold',
+             ff.hetstat='bold',
+             ff.test.overall='bold',
+             ff.random.labels = 'bold',
+             col.diamond.random='navy',
+             col.predict='red',
+             leftcols=c("studlab", "year", "country","metric"),
+             leftlabs = c("Study", "Year", "Country","Outcome"))
+```
+
+
+## Meta-regression
+
+Perform meta-regression, create object with splines
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# filter dataset
+ihdregr= metaregr %>% filter(disease=='Ischemic heart disease')
+# add outlier column
+ihdregr$outlier=ihd.trim$is_outlier
+# filter
+ihdregr=ihdregr %>% filter(outlier==0)
+# create splines object on the observed noise level exposure
+spline_basis=ns(ihdregr$noiselevel, df = 2)
+# compute meta-regression
+res_spline=rma(yi = beta, sei = sebeta, 
+                  mods = spline_basis, 
+                  random = ~ 1 | author,
+                  data = ihdregr, 
+               method = "REML")
+```
+\
+With the new object, compute predictions over the interval, to obtain the exposure response function
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# create new level of exposure
+new_exposure=seq(min(ihdregr$noiselevel),
+                 max(ihdregr$noiselevel), length.out = 100)
+# fit splines to the new exposure
+new_spline_basis=ns(new_exposure, df = 2)
+# predict 
+pred_spline1=predict(res_spline, newmods = new_spline_basis)
+# create df
+dfsplines1=data.frame(pred=pred_spline1$pred,
+                     lower=pred_spline1$ci.lb,
+                     upper=pred_spline1$ci.ub,
+                     exposure=new_exposure)
+```
+\
+Plot exposure response function with points
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ggplot(ihdregr,aes(x=noiselevel,y=beta))+
+  geom_point(aes(x=noiselevel,y=beta,size=sebeta),alpha=.5,col="#005c99")+
+  #geom_label_repel()+
+  guides(size='none')+
+  labs(x='Noise Exposure',
+       y='Log Relative Risk')+
+  scale_x_continuous(breaks=seq(45,80,5))+
+  geom_line(data=dfsplines1,aes(x=exposure,y=pred), col="#66a3ff")+
+  geom_ribbon(data=dfsplines1,aes(x=exposure,y=pred,ymin = lower, ymax = upper),
+              alpha = 0.2, col="#66a3ff",fill="#66a3ff") +  # Add confidence intervals
+  theme_bw()+
+  geom_hline(yintercept = 0,lty=2,col='black')
+```
+
+
+### Funnel plot
+
+Funnel plot for publication bias assessment:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+residuals=residuals(res_spline)
+ihdregr$residuals=residuals
+# extract estimate
+estimate=0
+se=res_spline$se[1]
+se.seq=seq(0, max(ihdregr$sebeta)+0.02, 0.01)
+#Compute vectors of the lower-limit and upper limit values for
+#the 95% CI region
+ll95 = estimate-(1.96*se.seq)
+ul95 = estimate+(1.96*se.seq)
+#
+seq.mean=seq(0,0.25,by=0.1)
+#You can ignore it.
+dfcenter=data.frame(y=estimate,
+                    x=seq(0,max(ihdregr$sebeta)+0.02,0.01))
+dfCI = data.frame(ll95, ul95, se.seq, estimate)
+# Define fill colors for contour
+ggplot(data=ihdregr,aes(x=sebeta,y=residuals))+
+  geom_point(data=ihdregr,aes(x=sebeta,y=beta,size=sebeta,alpha=0.7))+
+  geom_line(aes(x = se.seq, y = ll95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  geom_line(aes(x = se.seq, y = ul95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  #geom_line(aes(x = se.seq, y = ll99), data = dfCI,col='red') +
+  #geom_line(aes(x = se.seq, y = ul99), data = dfCI,col='red') +
+  geom_line(aes(x=x,y=y),col='black',data=,dfcenter,alpha=0.8,lty=2)+
+  scale_x_reverse()+
+  #scale_y_continuous(breaks=seq(-1.25,2,0.25))+
+  coord_flip()+
+  guides(size='none',
+         alpha='none')+
+     annotate(geom = "polygon", x = c(max(se.seq), 0, max(se.seq)),
+              y = c(min(dfCI$ll95), estimate,max(dfCI$ul95)), fill = "gray", alpha = 0.1 )+
+  theme_bw()+
+  labs(x='Standard Error',
+       y='Residuals')
+
+#Egger's test
+egger_test <- lm(beta ~ sebeta, data = ihdregr)
+summary(egger_test)
+et_pval <- summary(egger_test)$coefficients[2, 4]
+print(et_pval)
+```
+
+
+
+# Stroke
+
+## Meta-Analysis
+
+Analysis for stroke
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+keep(meta, metaregr, sure = T)
+# trim dataset
+stroke.trim=stroke.ihme %>%
+  mutate(studyid=study_id) %>% 
+  select(studyid, is_outlier) %>% 
+  arrange(studyid)
+```
+\
+Filter for disease and rows
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# filter for the outcome of interest
+stroke=meta %>% 
+  filter(disease=='Stroke') %>% 
+  arrange(studyid) %>% 
+  mutate(author=ifelse(author=='Cole‑Hunter et al.','Cole - Hunter et al.',author))
+# filter other rows
+stroke=stroke[-c(2,9,11,12),]
+```
+\
+Compute fixed and random effects models
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# fixed effects
+fixed.stroke=metagen(beta,sebeta,data=stroke,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=TRUE,comb.random=FALSE,sm="RR")
+# random effects
+random.stroke=metagen(beta,sebeta,data=stroke,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=FALSE,comb.random=TRUE,
+                     method.tau="PM",prediction=TRUE,hakn=TRUE,sm="RR")
+```
+\
+Summary of fixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(fixed.stroke)
+```
+\
+Summary of mixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(random.stroke)
+```
+
+
+### Forest plot
+
+Forest plot of the chosen model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+meta::forest(random.stroke,
+             sortvar=country,
+             #fill='lightgrey',
+             #layout = "BMJ",
+             #type.study='circle',
+             psize=rep(0.3,11),
+             lty.equi = 2,
+             cex = 0.3,
+             #circlesize=0.8,
+             #rightlabs=c('RR', "95% CI", "Weight"),
+             header.line='both',
+             weight.study='same',
+             col.circle='black',
+             #col.lines='black',
+             ff.random='bold',
+             ff.predict='bold',
+             ff.hetstat='bold',
+             ff.test.overall='bold',
+             ff.random.labels = 'bold',
+             col.diamond.random='navy',
+             col.predict='red',
+             leftcols=c("studlab", "year", "country","metric"),
+             leftlabs = c("Study", "Year", "Country","Outcome"))
+```
+
+
+## Meta-regression
+
+Meta-regression to fit exposure-response function with splines
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# filter dataset
+strokeregr = metaregr %>% filter(disease=='Stroke')
+# add outlier column
+strokeregr$outlier=stroke.trim$is_outlier
+# filter
+strokeregr=strokeregr %>% filter(outlier==0)
+# create splines object on the observed noise level exposure
+spline_basis=ns(strokeregr$noiselevel, df = 3)
+# compute meta-regression
+res_spline=rma(yi = beta, sei = sebeta, 
+                  mods = spline_basis, 
+                  random = ~ 1 | author,
+                  data = strokeregr, 
+               method = "REML")
+```
+\
+With the new object, compute predictions over the interval, to obtain the exposure response function
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# create new level of exposure
+new_exposure=seq(min(strokeregr$noiselevel),
+                 max(strokeregr$noiselevel), length.out = 100)
+# fit splines to the new exposure
+new_spline_basis=ns(new_exposure, df = 3)
+# predict 
+pred_spline1=predict(res_spline, newmods = new_spline_basis)
+# create df
+dfsplines1=data.frame(pred=pred_spline1$pred,
+                     lower=pred_spline1$ci.lb,
+                     upper=pred_spline1$ci.ub,
+                     exposure=new_exposure)
+```
+\
+Plot exposure response function with points
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ggplot(strokeregr,aes(x=noiselevel,y=beta))+
+  geom_point(aes(x=noiselevel,y=beta,size=sebeta),alpha=.5,col="#005c99")+
+  #geom_label_repel()+
+  guides(size='none')+
+  labs(x='Noise Exposure',
+       y='Log Relative Risk')+
+  scale_x_continuous(breaks=seq(45,80,5))+
+  geom_line(data=dfsplines1,aes(x=exposure,y=pred), col="#66a3ff")+
+  geom_ribbon(data=dfsplines1,aes(x=exposure,y=pred,ymin = lower, ymax = upper),
+              alpha = 0.2, col="#66a3ff",fill="#66a3ff") +  # Add confidence intervals
+  theme_bw()+
+  geom_hline(yintercept = 0,lty=2,col='black')
+```
+
+
+### Funnel plot
+
+Funnel plot for publication bias assessment:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+residuals=residuals(res_spline)
+strokeregr$residuals=residuals
+# extract estimate
+estimate=0
+se=res_spline$se[1]
+se.seq=seq(0, max(strokeregr$sebeta)+0.02, 0.01)
+#Compute vectors of the lower-limit and upper limit values for
+#the 95% CI region
+ll95 = estimate-(1.96*se.seq)
+ul95 = estimate+(1.96*se.seq)
+#
+seq.mean=seq(0,0.25,by=0.1)
+#You can ignore it.
+dfcenter=data.frame(y=estimate,
+                    x=seq(0,max(strokeregr$sebeta)+0.02,0.01))
+dfCI = data.frame(ll95, ul95, se.seq, estimate)
+# Define fill colors for contour
+ggplot(data=strokeregr,aes(x=sebeta,y=residuals))+
+  geom_point(data=strokeregr,aes(x=sebeta,y=beta,size=sebeta,alpha=0.7))+
+  geom_line(aes(x = se.seq, y = ll95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  geom_line(aes(x = se.seq, y = ul95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  #geom_line(aes(x = se.seq, y = ll99), data = dfCI,col='red') +
+  #geom_line(aes(x = se.seq, y = ul99), data = dfCI,col='red') +
+  geom_line(aes(x=x,y=y),col='black',data=,dfcenter,alpha=0.8,lty=2)+
+  scale_x_reverse()+
+  #scale_y_continuous(breaks=seq(-1.25,2,0.25))+
+  coord_flip()+
+  guides(size='none',
+         alpha='none')+
+     annotate(geom = "polygon", x = c(max(se.seq), 0, max(se.seq)),
+              y = c(min(dfCI$ll95), estimate,max(dfCI$ul95)), fill = "gray", alpha = 0.1 )+
+  theme_bw()+
+  labs(x='Standard Error',
+       y='Residuals')
+
+#Egger's test
+egger_test <- lm(beta ~ sebeta, data = strokeregr)
+summary(egger_test)
+et_pval <- summary(egger_test)$coefficients[2, 4]
+print(et_pval)
+```
+
+
+
+# Ischemic stroke
+
+## Meta-Analysis
+
+Analysis for ischemic stroke
+\
+```{r}
+keep(meta, metaregr, sure = T)
+# trim dataset
+istroke.trim=istroke.ihme %>%
+  mutate(studyid=study_id) %>% 
+  select(studyid, is_outlier) %>% 
+  arrange(studyid) 
+```
+\
+Filter for disease and rows
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# filter for the outcome of interest
+istroke=meta %>% 
+  filter(disease=='Ischemic stroke') %>% 
+  arrange(studyid) %>% 
+  mutate(author=ifelse(author=='Cole‑Hunter et al.','Cole - Hunter et al.',author))
+# filter rows
+istroke=istroke[-c(6,7,9),]
+```
+\
+Compute fixed and random effects models
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# fixed effects
+fixed.istroke=metagen(beta,sebeta,data=istroke,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=TRUE,comb.random=FALSE,sm="RR")
+# random effects
+random.istroke=metagen(beta,sebeta,data=istroke,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=FALSE,comb.random=TRUE,
+                     method.tau="PM",prediction=TRUE,hakn=TRUE,sm="RR")
+```
+\
+Summary of fixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(fixed.istroke)
+```
+\
+Summary of mixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(random.istroke)
+```
+
+
+### Forest plot
+
+Forest plot of the chosen model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+meta::forest(fixed.istroke,
+             sortvar=country,
+             #fill='lightgrey',
+             #layout = "BMJ",
+             #type.study='circle',
+             psize=rep(0.3,11),
+             lty.equi = 2,
+             cex = 0.3,
+             #circlesize=0.8,
+             #rightlabs=c('RR', "95% CI", "Weight"),
+             header.line='both',
+             weight.study='same',
+             col.circle='black',
+             #col.lines='black',
+             ff.random='bold',
+             ff.predict='bold',
+             ff.hetstat='bold',
+             ff.test.overall='bold',
+             ff.random.labels = 'bold',
+             col.diamond.random='navy',
+             col.predict='red',
+             leftcols=c("studlab", "year", "country","metric"),
+             leftlabs = c("Study", "Year", "Country","Outcome"))
+```
+
+
+## Meta-regression
+
+Meta-regression to fit exposure-response function with splines
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# filter dataset
+istrokeregr = metaregr %>% filter(disease=='Ischemic stroke')
+# add outlier column
+istrokeregr$outlier=istroke.trim$is_outlier
+# filter
+istrokeregr=istrokeregr %>% filter(outlier==0)
+# create splines object on the observed noise level exposure
+spline_basis=ns(istrokeregr$noiselevel, df = 3)
+# compute meta-regression
+res_spline=rma(yi = beta, sei = sebeta, 
+                  mods = spline_basis, 
+                  #random = ~ 1 | author,
+                  data = istrokeregr, 
+               method = "REML")
+```
+\
+With the new object, compute predictions over the interval, to obtain the exposure response function
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# create new level of exposure
+new_exposure=seq(min(istrokeregr$noiselevel),
+                 max(istrokeregr$noiselevel), length.out = 100)
+# fit splines to the new exposure
+new_spline_basis=ns(new_exposure, df = 3)
+# predict 
+pred_spline1=predict(res_spline, newmods = new_spline_basis)
+# create df
+dfsplines1=data.frame(pred=pred_spline1$pred,
+                     lower=pred_spline1$ci.lb,
+                     upper=pred_spline1$ci.ub,
+                     exposure=new_exposure)
+```
+\
+Plot exposure response function with points
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ggplot(istrokeregr,aes(x=noiselevel,y=beta))+
+  geom_point(aes(x=noiselevel,y=beta,size=sebeta),alpha=.5,col="#005c99")+
+  #geom_label_repel()+
+  guides(size='none')+
+  labs(x='Noise Exposure',
+       y='Log Relative Risk')+
+  scale_x_continuous(breaks=seq(45,80,5))+
+  geom_line(data=dfsplines1,aes(x=exposure,y=pred), col="#66a3ff")+
+  geom_ribbon(data=dfsplines1,aes(x=exposure,y=pred,ymin = lower, ymax = upper),
+              alpha = 0.2, col="#66a3ff",fill="#66a3ff") +  # Add confidence intervals
+  theme_bw()+
+  geom_hline(yintercept = 0,lty=2,col='black')
+```
+
+
+### Funnel plot
+
+Funnel plot for publication bias assessment:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+residuals=residuals(res_spline)
+istrokeregr$residuals=residuals
+# extract estimate
+estimate=0
+se=res_spline$se[1]
+se.seq=seq(0, max(istrokeregr$sebeta)+0.02, 0.01)
+#Compute vectors of the lower-limit and upper limit values for
+#the 95% CI region
+ll95 = estimate-(1.96*se.seq)
+ul95 = estimate+(1.96*se.seq)
+#
+seq.mean=seq(0,0.25,by=0.1)
+#You can ignore it.
+dfcenter=data.frame(y=estimate,
+                    x=seq(0,max(istrokeregr$sebeta)+0.02,0.01))
+dfCI = data.frame(ll95, ul95, se.seq, estimate)
+# Define fill colors for contour
+ggplot(data=istrokeregr,aes(x=sebeta,y=residuals))+
+  geom_point(data=istrokeregr,aes(x=sebeta,y=beta,size=sebeta,alpha=0.7))+
+  geom_line(aes(x = se.seq, y = ll95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  geom_line(aes(x = se.seq, y = ul95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  #geom_line(aes(x = se.seq, y = ll99), data = dfCI,col='red') +
+  #geom_line(aes(x = se.seq, y = ul99), data = dfCI,col='red') +
+  geom_line(aes(x=x,y=y),col='black',data=,dfcenter,alpha=0.8,lty=2)+
+  scale_x_reverse()+
+  #scale_y_continuous(breaks=seq(-1.25,2,0.25))+
+  coord_flip()+
+  guides(size='none',
+         alpha='none')+
+     annotate(geom = "polygon", x = c(max(se.seq), 0, max(se.seq)),
+              y = c(min(dfCI$ll95), estimate,max(dfCI$ul95)), fill = "gray", alpha = 0.1 )+
+  theme_bw()+
+  labs(x='Standard Error',
+       y='Residuals')
+
+#Egger's test
+egger_test <- lm(beta ~ sebeta, data = istrokeregr)
+summary(egger_test)
+et_pval <- summary(egger_test)$coefficients[2, 4]
+print(et_pval)
+```
+
+# CVDs
+
+## Meta-Analysis
+
+Analysis for cardiovascular diseases:
+\
+```{r}
+keep(meta, metaregr, sure = T)
+# trim dataset
+cvds.trim=cvds.ihme %>%
+  mutate(studyid=study_id) %>% 
+  select(studyid, is_outlier) %>% 
+  arrange(studyid)
+```
+\
+Filter for disease of interest and rows
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# filter for the outcome of interest
+cvds=meta %>% 
+  filter(disease=='Cardiovascular diseases') %>% 
+  arrange(studyid)
+# filter other rows
+cvds=cvds[-c(5),]
+```
+\
+Compute fixed and random effects models
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# fixed effects
+fixed.cvds=metagen(beta,sebeta,data=cvds,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=TRUE,comb.random=FALSE,sm="RR")
+# random effects
+random.cvds=metagen(beta,sebeta,data=cvds,
+                     studlab=paste(author,sep=","),
+                     comb.fixed=FALSE,comb.random=TRUE,
+                     method.tau="PM",prediction=TRUE,hakn=TRUE,sm="RR")
+```
+\
+Summary of fixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(fixed.cvds)
+```
+\
+Summary of mixed effects model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results = 'hide'}
+summary(random.cvds)
+```
+
+
+### Forest plot
+
+Forest plot of the chosen model:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+meta::forest(fixed.cvds,
+             sortvar=country,
+             #fill='lightgrey',
+             #layout = "BMJ",
+             #type.study='circle',
+             psize=rep(0.3,11),
+             lty.equi = 2,
+             cex = 0.3,
+             #circlesize=0.8,
+             #rightlabs=c('RR', "95% CI", "Weight"),
+             header.line='both',
+             weight.study='same',
+             col.circle='black',
+             #col.lines='black',
+             ff.random='bold',
+             ff.predict='bold',
+             ff.hetstat='bold',
+             ff.test.overall='bold',
+             ff.random.labels = 'bold',
+             col.diamond.random='navy',
+             col.predict='red',
+             leftcols=c("studlab", "year", "country","metric"),
+             leftlabs = c("Study", "Year", "Country","Outcome"))
+```
+
+
+## Meta-regression
+
+Meta-regression to fit exposure-response function with splines
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# filter dataset
+cvdsregr = metaregr %>% filter(disease=='Cardiovascular diseases')
+# add outlier column
+cvdsregr$outlier=cvds.trim$is_outlier
+# filter
+cvdsregr=cvdsregr %>% filter(outlier==0)
+# create splines object on the observed noise level exposure
+spline_basis=ns(cvdsregr$noiselevel, df = 3)
+# compute meta-regression
+res_spline=rma(yi = beta, sei = sebeta, 
+                  mods = spline_basis, 
+                  random = ~ 1 | author,
+                  data = cvdsregr, 
+               method = "REML")
+```
+\
+With the new object, compute predictions over the interval, to obtain the exposure response function
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# create new level of exposure
+new_exposure=seq(min(cvdsregr$noiselevel),
+                 max(cvdsregr$noiselevel), length.out = 100)
+# fit splines to the new exposure
+new_spline_basis=ns(new_exposure, df = 3)
+# predict 
+pred_spline1=predict(res_spline, newmods = new_spline_basis)
+# create df
+dfsplines1=data.frame(pred=pred_spline1$pred,
+                     lower=pred_spline1$ci.lb,
+                     upper=pred_spline1$ci.ub,
+                     exposure=new_exposure)
+```
+\
+Plot exposure response function with points
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ggplot(cvdsregr,aes(x=noiselevel,y=beta))+
+  geom_point(aes(x=noiselevel,y=beta,size=sebeta),alpha=.5,col="#005c99")+
+  #geom_label_repel()+
+  guides(size='none')+
+  labs(x='Noise Exposure',
+       y='Log Relative Risk')+
+  scale_x_continuous(breaks=seq(45,80,5))+
+  geom_line(data=dfsplines1,aes(x=exposure,y=pred), col="#66a3ff")+
+  geom_ribbon(data=dfsplines1,aes(x=exposure,y=pred,ymin = lower, ymax = upper),
+              alpha = 0.2, col="#66a3ff",fill="#66a3ff") +  # Add confidence intervals
+  theme_bw()+
+  geom_hline(yintercept = 0,lty=2,col='black')
+```
+
+
+### Funnel plot
+
+Funnel plot for publication bias assessment:
+\
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+residuals=residuals(res_spline)
+cvdsregr$residuals=residuals
+# extract estimate
+estimate=0
+se=res_spline$se[1]
+se.seq=seq(0, max(cvdsregr$sebeta)+0.02, 0.01)
+#Compute vectors of the lower-limit and upper limit values for
+#the 95% CI region
+ll95 = estimate-(1.96*se.seq)
+ul95 = estimate+(1.96*se.seq)
+#
+seq.mean=seq(0,0.25,by=0.1)
+#You can ignore it.
+dfcenter=data.frame(y=estimate,
+                    x=seq(0,max(cvdsregr$sebeta)+0.02,0.01))
+dfCI = data.frame(ll95, ul95, se.seq, estimate)
+# Define fill colors for contour
+ggplot(data=cvdsregr,aes(x=sebeta,y=residuals))+
+  geom_point(data=cvdsregr,aes(x=sebeta,y=beta,size=sebeta,alpha=0.7))+
+  geom_line(aes(x = se.seq, y = ll95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  geom_line(aes(x = se.seq, y = ul95), data = dfCI,col='black',alpha=0.8,lty=2) +
+  #geom_line(aes(x = se.seq, y = ll99), data = dfCI,col='red') +
+  #geom_line(aes(x = se.seq, y = ul99), data = dfCI,col='red') +
+  geom_line(aes(x=x,y=y),col='black',data=,dfcenter,alpha=0.8,lty=2)+
+  scale_x_reverse()+
+  #scale_y_continuous(breaks=seq(-1.25,2,0.25))+
+  coord_flip()+
+  guides(size='none',
+         alpha='none')+
+     annotate(geom = "polygon", x = c(max(se.seq), 0, max(se.seq)),
+              y = c(min(dfCI$ll95), estimate,max(dfCI$ul95)), fill = "gray", alpha = 0.1 )+
+  theme_bw()+
+  labs(x='Standard Error',
+       y='Residuals')
+```
+\
+Egger's test to test presence of publication bias:
+\
+```{r}
+#Egger's test
+egger_test=lm(beta ~ sebeta, data = cvdsregr)
+summary(egger_test)
+et_pval=summary(egger_test)$coefficients[2, 4]
+print(et_pval)
+```
+
